@@ -1,0 +1,140 @@
+-----------------------------------------------------------------------------------
+EDA
+-----------------------------------------------------------------------------------
+# date range and number of entries (2021-10-27 to 2026-10-27, 1305)
+SELECT MIN(observation_date), MAX(observation_date), COUNT(*)
+FROM oil_prices_raw;
+
+# basic price stats (min=55.44, max=123.64, avg=79.89)
+SELECT MIN(price), MAX(price), AVG(price)
+FROM oil_prices_raw;
+
+# check for duplicate entries using dates (none)
+SELECT observation_date, COUNT(*)
+FROM oil_prices_raw
+GROUP BY observation_date
+HAVING COUNT(*) > 1;
+
+# check for missing values (57)
+SELECT COUNT(*)
+FROM oil_prices_raw
+WHERE price IS NULL;
+
+SELECT observation_date
+FROM oil_prices_raw
+WHERE price IS NULL
+ORDER BY observation_date
+LIMIT 15;
+
+# check for outlandish values (0 or negative)
+SELECT COUNT(*)
+FROM oil_prices_raw
+WHERE price IS NULL;
+
+-----------------------------------------------------------------------------------
+Preprocessing
+-----------------------------------------------------------------------------------
+# forward fill missing dates
+CREATE TABLE oil_prices_clean AS
+SELECT
+    observation_date,
+    price,
+    (
+        SELECT r2.price
+        FROM oil_prices_raw r2
+        WHERE r2.observation_date <= r1.observation_date
+          AND r2.price IS NOT NULL
+        ORDER BY r2.observation_date DESC
+        LIMIT 1
+    ) AS price_filled
+FROM oil_prices_raw r1
+ORDER BY observation_date;
+
+-----------------------------------------------------------------------------------
+Forecast Prep - EDA
+-----------------------------------------------------------------------------------
+# study change from day to day 
+CREATE TABLE oil_prices_daily AS
+SELECT
+    observation_date,
+    price_filled AS price,
+    LAG(price_filled) OVER (ORDER BY observation_date) AS prev_price
+FROM oil_prices_clean
+ORDER BY observation_date;
+
+SELECT
+    observation_date,
+    price,
+    prev_price,
+    price - prev_price AS change
+FROM oil_prices_daily
+WHERE prev_price IS NOT NULL
+ORDER BY ABS(price - prev_price) DESC
+LIMIT 10;
+
+# Q: the biggest jumps occured 2026, is this a general pattern for this year? or a coincidence?
+# answer: yes, 2026 has a significantly high std., much higher than all previous years 
+# this counts as a "regime change", something to look out for when splitting?
+SELECT
+    EXTRACT(YEAR FROM observation_date) AS year,
+    COUNT(*) AS days,
+    AVG(price) AS avg_price,
+    STDDEV(price - prev_price) AS daily_change_stddev
+FROM oil_prices_daily
+WHERE prev_price IS NOT NULL
+GROUP BY EXTRACT(YEAR FROM observation_date)
+ORDER BY year;
+
+-----------------------------------------------------------------------------------
+Forecast - Results Prep for Visualisation
+-----------------------------------------------------------------------------------
+
+CREATE TABLE forecast_results (
+    observation_date DATE,
+    actual_price NUMERIC(8,2),
+    naive_forecast NUMERIC(8,2),
+    ma5_forecast NUMERIC(8,2),
+    arima_forecast NUMERIC(8,2)
+);
+
+# price + forecast
+CREATE TABLE tableau_prices AS
+SELECT
+    d.observation_date,
+    d.price,
+    f.naive_forecast,
+    f.ma5_forecast,
+    f.arima_forecast
+FROM oil_prices_daily d
+LEFT JOIN forecast_results f
+    ON d.observation_date = f.observation_date
+ORDER BY d.observation_date;
+
+# model errors
+CREATE TABLE tableau_errors AS
+SELECT observation_date, 'Naive' AS model, actual_price,
+       naive_forecast AS forecast,
+       ABS(actual_price - naive_forecast) AS abs_error
+FROM forecast_results
+UNION ALL
+SELECT observation_date, '5-day MA' AS model, actual_price,
+       ma5_forecast AS forecast,
+       ABS(actual_price - ma5_forecast) AS abs_error
+FROM forecast_results
+UNION ALL
+SELECT observation_date, 'ARIMA' AS model, actual_price,
+       arima_forecast AS forecast,
+       ABS(actual_price - arima_forecast) AS abs_error
+FROM forecast_results;
+
+# yearly volatility
+CREATE TABLE tableau_yearly AS
+SELECT
+    EXTRACT(YEAR FROM observation_date) AS year,
+    COUNT(*) AS days,
+    AVG(price) AS avg_price,
+    STDDEV(price - prev_price) AS daily_change_stddev
+FROM oil_prices_daily
+WHERE prev_price IS NOT NULL
+GROUP BY EXTRACT(YEAR FROM observation_date)
+ORDER BY year;
